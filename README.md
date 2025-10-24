@@ -53,14 +53,22 @@ Upload a JSON schema, and the UI is automatically generated at runtime — inclu
 ```json
 {
   "properties": {
-    "name": { "type": "string" },
-    "email": { "type": "string" },
+    "name":        { "type": "string", "required": true },
+    "email":       { "type": "string" },
+    "address": {
+      "type": "object",
+      "section": "Address",
+      "properties": {
+        "city":    { "type": "string" },
+        "pincode": { "type": "string", "title": "PIN Code" }
+      }
+    },
     "children": {
       "type": "array",
       "items": {
         "properties": {
-          "name": { "type": "string" },
-          "age": { "type": "number" }
+          "name": { "type": "string", "title": "Child Name", "required": true },
+          "age":  { "type": "number", "title": "Age" }
         }
       }
     }
