@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Metawidget – Schema Upload</title>
+
+  <!-- Local Metawidget core (must be served next to this file) -->
+  <script src="./metawidget-core.min.js"></script>
+
+  <style>
+    :root { --pad: 14px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; background: #fafafa; }
+    h1 { margin-bottom: 6px; }
+    .muted { color: #6b7280; margin-bottom: 14px; }
+    .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 18px; }
+    input[type="file"], button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; }
+    button.primary { background: #111827; color: #fff; border-color: #111827; cursor: pointer; }
+    button.secondary { background: #fff; color: #111827; cursor: pointer; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: var(--pad); box-shadow: 0 1px 4px rgba(0,0,0,.06); margin-bottom: 16px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .list-section { margin-top: 6px; }
+    .list-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+    .list-title { margin: 0; }
+    .list-info { margin: 0; color: #6b7280; font-size: 0.95rem; }
+    .child-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; margin-bottom: 10px; background: #fcfcfc; }
+    pre { background: #0b1020; color: #d6e2ff; padding: 12px; border-radius: 8px; overflow: auto; }
+    table.metawidget-table-layout td { padding: 6px 10px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <h1>Metawidget Form</h1>
+  <div class="muted">Upload a <strong>schema JSON</strong>. The form & list sections are generated automatically.</div>
+
+  <!-- Controls toolbar -->
+  <div class="bar">
+    <!-- File picker for the user to upload a JSON schema -->
+    <input type="file" id="schemaFile" accept="application/json" />
+
+    <!-- Build UI from uploaded schema -->
+    <button id="loadBtn" class="primary">Load Schema</button>
+
+    <!-- Reset current model back to a blank object that matches the schema -->
+   
+  </div>
+
+  <!-- Root (non-list) form region -->
+  <div class="card">
+    <h3>Form</h3>
+    <div id="formHost"></div>
+  </div>
+
+  <!-- Each root-level array with item.properties renders as its own section here -->
+  <div id="listsContainer"></div>
+
+  <div class="bar">
+ <button id="resetBtn" class="secondary">Reset</button>
+
+    <!-- Persist current (cleaned) model to localStorage -->
+    <button id="saveBtn" class="secondary">Save</button>
+
+    <!-- Load previously saved model from localStorage -->
+    <button id="loadLocalBtn" class="secondary">Load</button>
+
+    <!-- Download the current (cleaned) model as a JSON file -->
+    <button id="downloadBtn" class="secondary">Download Data</button>
+  </div>
+
+  <!-- Live model viewer for easy debugging / demo -->
+  <div class="card">
+    <h3>Raw Data</h3>
+    <pre id="debug"></pre>
+  </div>
+
+  <script>
+    // -------------------------
+    //  Boot guard: ensure Metawidget is present
+    // -------------------------
+    if (typeof window.metawidget === 'undefined') {
+      alert('Error: metawidget-core.min.js not found in root folder');
+      throw new Error('Metawidget not loaded');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      // -------------------------
+      //  Query DOM elements once
+      // -------------------------
+      const schemaFileEl   = document.getElementById('schemaFile');
+      const loadBtn        = document.getElementById('loadBtn');
+      const resetBtn       = document.getElementById('resetBtn');
+      const saveBtn        = document.getElementById('saveBtn');
+      const loadLocalBtn   = document.getElementById('loadLocalBtn');
+      const downloadBtn    = document.getElementById('downloadBtn');
+
+      const formHost       = document.getElementById('formHost');
+      const listsContainer = document.getElementById('listsContainer');
+      const debugEl        = document.getElementById('debug');
+
+      // -------------------------
+      //  App state (in-memory)
+      // -------------------------
+      const STORAGE_KEY = 'mw_dynamic_any_model'; // localStorage key namespace
+      let schema = null;                 // Uploaded JSON schema
+      let model = {};                    // Live data bound to generated widgets
+      let rootMW = null;                 // Metawidget instance rendering the root form
+      let listKeys = [];                 // Root properties that are arrays with items.properties
+      let listItemPropsMap = {};         // { listKey -> items.properties }
+      let listMWsMap = {};               // { listKey -> [Metawidget instances for each row] }
+
+      // ======================================================
+      // Helpers
+      // ======================================================
+
+      /**
+       * Read the selected file from an <input type="file"> as JSON.
+       * Returns the parsed object or null if no file/invalid JSON.
+       */
+      function readJsonFile(inputEl) {
+        return new Promise((resolve) => {
+          const f = inputEl.files && inputEl.files[0];
+          if (!f) return resolve(null);
+          const r = new FileReader();
+          r.onload = () => {
+            try { resolve(JSON.parse(r.result)); }
+            catch (e) { alert('Invalid JSON: ' + f.name); resolve(null); }
+          };
+          r.readAsText(f);
+        });
+      }
+
+      /**
+       * Walk the schema along a path of property names provided by Metawidget.
+       * Handles stepping into array item schemas when needed.
+       * @param {object} rootSchema - The full schema.
+       * @param {string[]} names - Path parts (e.g., ["address", "city"]).
+       * @returns {object|undefined} - The subschema at that path.
+       */
+      function getSubschema(rootSchema, names) {
+        let node = rootSchema;
+        for (const part of (names || [])) {
+          const prop = node && node.properties && node.properties[part];
+          if (!prop) return undefined;
+          if (prop.type === 'array' && prop.items) node = prop.items; // dive into items for arrays
+          else node = prop;                                           // dive into nested object/leaf
+        }
+        return node;
+      }
+
+      /**
+       * Create a blank model object that structurally matches the provided schema.
+       * - object  -> nested object initialized
+       * - array   -> []
+       * - boolean -> false
+       * - other   -> '' (empty string)
+       */
+      function deepInitFromSchema(node) {
+        if (!node || typeof node !== 'object') return {};
+        const out = {};
+        const props = node.properties || {};
+        for (const key of Object.keys(props)) {
+          const def = props[key];
+          if (def.type === 'object') out[key] = deepInitFromSchema(def);
+          else if (def.type === 'boolean') out[key] = false;
+          else if (def.type === 'array') out[key] = [];
+          else out[key] = '';
+        }
+        return out;
+      }
+
+      /**
+       * Find all root-level array properties that define item fields (items.properties).
+       * These will be rendered as their own list sections.
+       */
+      function detectListKeys(schemaObj) {
+        const keys = [];
+        const props = schemaObj?.properties || {};
+        for (const k of Object.keys(props)) {
+          const def = props[k];
+          if (def?.type === 'array' && def.items?.properties) keys.push(k);
+        }
+        return keys;
+      }
+
+      /**
+       * Return a shallow copy of the root schema with list keys removed from properties.
+       * This avoids stray labels for arrays appearing in the root form (they get their own sections).
+       */
+      function rootSchemaWithoutLists(schemaObj, keysToRemove) {
+        if (!schemaObj) return schemaObj;
+        const copy = { ...schemaObj, properties: { ...(schemaObj.properties || {}) } };
+        (keysToRemove || []).forEach(k => delete copy.properties[k]);
+        return copy;
+      }
+
+      /**
+       * Very light label beautifier: capitalize first letter and add space before camelCase boundaries.
+       */
+      function titleize(s) {
+        if (!s) return '';
+        return s.charAt(0).toUpperCase() + s.slice(1).replace(/([a-z])([A-Z])/g, '$1 $2');
+      }
+
+      /**
+       * Create a data object that contains ONLY fields defined by the schema, recursively.
+       * - Prevents exporting extra/unknown fields (safety & cleanliness)
+       * - When properties are missing in data, supplies safe defaults ('' or [])
+       */
+      function projectToSchema(dataNode, schemaNode) {
+        if (!schemaNode || typeof schemaNode !== 'object') return {};
+
+        // Arrays: map each element through the child item schema
+        if (schemaNode.type === 'array' && schemaNode.items) {
+          const arr = Array.isArray(dataNode) ? dataNode : [];
+          return arr.map(item => projectToSchema(item, schemaNode.items));
+        }
+
+        // Objects: project only declared properties
+        if (schemaNode.properties && typeof schemaNode.properties === 'object') {
+          const out = {};
+          for (const key of Object.keys(schemaNode.properties)) {
+            const propSchema = schemaNode.properties[key];
+            const val = (dataNode && dataNode[key] !== undefined) ? dataNode[key] : undefined;
+
+            if (propSchema.type === 'object') {
+              out[key] = projectToSchema(val || {}, propSchema);
+            } else if (propSchema.type === 'array') {
+              out[key] = projectToSchema(val || [], propSchema);
+            } else {
+              out[key] = val !== undefined ? val : '';
+            }
+          }
+          return out;
+        }
+
+        // Fallback: non-object schema nodes are projected as empty objects
+        return {};
+      }
+
+      /** Convenience wrapper to get a schema-projected copy of the live model. */
+      function cleanedModelForExport() { return projectToSchema(model, schema); }
+
+      /** Update the debug panel with the latest live model snapshot. */
+      function refreshDebug() {
+        debugEl.textContent = JSON.stringify(model, null, 2);
+      }
+
+      // ======================================================
+      // Root form building (non-list properties)
+      // ======================================================
+
+      /**
+       * Build the root form based on the uploaded schema.
+       * The custom inspector hides list properties from this region so they can be rendered separately.
+       */
+      function buildRootForm() {
+        formHost.innerHTML = '';
+        rootMW = new metawidget.Metawidget(formHost, {
+          // The inspector tells Metawidget what fields to build at the current path
+          inspector: (toInspect, type, names) => {
+            const path = names || [];
+            if (path.length === 0) {
+              // At the root: hide all list keys so they don't render here
+              return rootSchemaWithoutLists(schema, listKeys);
+            }
+            // For nested paths, delegate to the corresponding subschema
+            const node = getSubschema(schema, path);
+            return (node && node.properties) ? node : undefined;
+          },
+          // Basic 2-column table layout
+          layout: new metawidget.layout.TableLayout({ numberOfColumns: 2 })
+        });
+        rootMW.toInspect = model; // bind the live model
+        rootMW.buildWidgets();    // render widgets into formHost
+      }
+
+      // ======================================================
+      // List sections (root arrays render as repeatable cards)
+      // ======================================================
+
+      /**
+       * Generate one section per list key (root-level arrays with item.properties).
+       * Each section supports adding/removing rows; each row is a mini Metawidget bound to model[key][i].
+       */
+      function renderAllLists() {
+        listsContainer.innerHTML = '';
+        listMWsMap = {};
+
+        if (!listKeys.length) return; // nothing to render if schema has no lists
+
+        listKeys.forEach((key) => {
+          // Ensure the model has an array for this list key
+          if (!Array.isArray(model[key])) model[key] = [];
+
+          // --- Section card scaffolding
+          const section = document.createElement('div');
+          section.className = 'card list-section';
+
+          const header = document.createElement('div');
+          header.className = 'list-header';
+
+          const h = document.createElement('h3');
+          h.className = 'list-title';
+          h.textContent = titleize(key);
+          header.appendChild(h);
+
+          // Add-row button (creates a new blank row following the item schema types)
+          const addBtn = document.createElement('button');
+          addBtn.className = 'secondary';
+          addBtn.textContent = `+ Add ${titleize(key).replace(/s$/, '')}`;
+          header.appendChild(addBtn);
+
+          section.appendChild(header);
+
+          const info = document.createElement('p');
+          info.className = 'list-info';
+          info.textContent = `Add/remove ${key} dynamically below.`;
+          section.appendChild(info);
+
+          // Container where row cards will be appended
+          const listHost = document.createElement('div');
+          section.appendChild(listHost);
+
+          listsContainer.appendChild(section);
+
+          // ---------- Inner renderer: (re)builds all rows for this list key
+          function renderThisList() {
+            listHost.innerHTML = '';
+            listMWsMap[key] = [];
+
+            const arr = model[key];
+            if (!arr.length) {
+              const p = document.createElement('p');
+              p.className = 'muted';
+              p.textContent = `No ${key} added yet.`;
+              listHost.appendChild(p);
+              return;
+            }
+
+            // Build each row as a mini form
+            arr.forEach((row, index) => {
+              const card = document.createElement('div');
+              card.className = 'child-card';
+
+              const host = document.createElement('div'); // host for Metawidget
+              card.appendChild(host);
+
+              // Row schema is simply the item properties for this list key
+              const rowSchema = { properties: listItemPropsMap[key] };
+
+              const mw = new metawidget.Metawidget(host, {
+                inspector: (toInspect, type, names) => {
+                  const node = getSubschema(rowSchema, names || []);
+                  return (node && node.properties) ? node : undefined;
+                },
+                layout: new metawidget.layout.TableLayout({ numberOfColumns: 2 })
+              });
+              mw.toInspect = row;   // bind this row object
+              mw.buildWidgets();    // render into host
+              listMWsMap[key].push(mw);
+
+              // Remove-row button (by index)
+              const removeBtn = document.createElement('button');
+              removeBtn.textContent = 'Remove';
+              removeBtn.onclick = (e) => {
+                e.preventDefault();
+                model[key].splice(index, 1); // remove from model
+                renderThisList();            // re-render list UI
+                refreshDebug();              // update debug pane
+              };
+              card.appendChild(removeBtn);
+
+              listHost.appendChild(card);
+            });
+          }
+
+          // Add-row handler: creates a blank object matching the item schema types
+          addBtn.onclick = () => {
+            const blank = {};
+            const defs = listItemPropsMap[key] || {};
+            for (const k of Object.keys(defs)) {
+              const t = defs[k]?.type;
+              blank[k] = (t === 'boolean') ? false : '';
+            }
+            model[key].push(blank);
+            renderThisList();
+            refreshDebug();
+          };
+
+          // Initial render for this list section
+          renderThisList();
+        });
+      }
+
+      // ======================================================
+      // Persistence & export utilities
+      // ======================================================
+
+      /** Flush widget UIs back into the model (Metawidget provides save()). */
+      function flushUI() {
+        if (rootMW?.save) rootMW.save();
+        Object.values(listMWsMap).forEach(mws => mws.forEach(mw => mw?.save && mw.save()));
+      }
+
+      /** Persist cleaned model to localStorage. */
+      function saveModel() {
+        if (!schema) return alert('Load a schema first.');
+        flushUI();
+        const clean = cleanedModelForExport();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
+        alert('Saved to localStorage');
+      }
+
+      /** Load model from localStorage and rebuild UI. */
+      function loadModel() {
+        if (!schema) return alert('Load a schema first.');
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return alert('No saved data found');
+        model = JSON.parse(raw);
+        buildRootForm();
+        renderAllLists();
+        refreshDebug();
+      }
+
+      /** Trigger a client-side download of an object as prettified JSON. */
+      function downloadJSON(filename, obj) {
+        const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename; a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // ======================================================
+      // Schema load (from user upload)
+      // ======================================================
+
+      /**
+       * Parse the uploaded schema, initialize a fresh model, detect list keys,
+       * then build the root form and list sections.
+       */
+      async function loadSchemaFromUpload() {
+        const uploaded = await readJsonFile(schemaFileEl);
+        if (!uploaded) { alert('Please choose a Schema JSON.'); return; }
+
+        schema = uploaded;                 // keep raw schema in memory
+        model = deepInitFromSchema(schema); // create a blank model matching schema
+
+        // Precompute list keys and cache their item properties for row forms
+        listKeys = detectListKeys(schema);
+        listItemPropsMap = {};
+        listKeys.forEach(k => {
+          listItemPropsMap[k] = schema.properties[k].items.properties;
+          if (!Array.isArray(model[k])) model[k] = []; // ensure array in model exists
+        });
+
+        buildRootForm();   // render non-list properties
+        renderAllLists();  // render list sections
+        refreshDebug();    // show initial (blank) model
+      }
+
+      // ======================================================
+      // Wire up UI events
+      // ======================================================
+      loadBtn.onclick = loadSchemaFromUpload;
+
+      // Reset to a fresh blank model matching the current schema
+      resetBtn.onclick = () => {
+        if (!schema) return alert('Load a schema first.');
+        model = deepInitFromSchema(schema);
+        listKeys.forEach(k => { if (!Array.isArray(model[k])) model[k] = []; });
+        buildRootForm();
+        renderAllLists();
+        refreshDebug();
+      };
+
+      saveBtn.onclick = saveModel;   // persist to localStorage
+      loadLocalBtn.onclick = loadModel; // read from localStorage
+
+      // Export cleaned data as downloadable JSON file
+      downloadBtn.onclick = () => {
+        if (!schema) return alert('Load a schema first.');
+        flushUI();
+        const clean = cleanedModelForExport();
+        downloadJSON('data-export.json', clean);
+      };
+    });
+  </script>
+</body>
+</html>

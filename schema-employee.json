@@ -1,0 +1,27 @@
+{
+  "properties": {
+    "employeeId": { "type": "string", "required": true, "title": "Employee ID" },
+    "fullName":   { "type": "string", "required": true, "title": "Full Name" },
+    "email":      { "type": "string" },
+    "position":   { "type": "string", "title": "Job Title" },
+    "department": { "type": "string", "title": "Department" },
+    "address": {
+      "type": "object",
+      "section": "Office Address",
+      "properties": {
+        "city":    { "type": "string" },
+        "pincode": { "type": "string", "title": "PIN Code" }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "properties": {
+          "projectName": { "type": "string", "title": "Project Name", "required": true },
+          "role":        { "type": "string", "title": "Role" },
+          "duration":    { "type": "string", "title": "Duration" }
+        }
+      }
+    }
+  }
+}
