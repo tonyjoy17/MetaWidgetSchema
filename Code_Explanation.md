@@ -3,7 +3,7 @@
 
 ---
 
-## 1) What this app does (plain English)
+## 1) What this app does
 
 You open a simple web page (`index.html`). You upload a **JSON schema** (a JSON file that describes what fields you want). The page:
 
